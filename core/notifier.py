@@ -12,17 +12,29 @@ BUCKET_NAME = Config.GCS_BUCKET_NAME
 CHUNK_LIMIT = 160
 
 
-def _load_token_dict():
-    # 0) 환경변수에 토큰이 직접 명시되어 있으면 최우선 사용
-    if Config.KAKAO_ACCESS_TOKEN:
-        return {
-            "access_token": Config.KAKAO_ACCESS_TOKEN,
-            "refresh_token": Config.KAKAO_REFRESH_TOKEN,
-            "client_id": Config.KAKAO_CLIENT_ID,
-            "client_secret": Config.KAKAO_CLIENT_SECRET,
-        }
+def _update_env_file(access_token: str, refresh_token: str = None):
+    """실행 환경의 .env 파일이 존재할 경우 새 토큰 값으로 자동 동기화"""
+    import re
+    candidates = [".env", os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")]
+    for env_path in set(candidates):
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if "KAKAO_ACCESS_TOKEN=" in content and access_token:
+                    content = re.sub(r"KAKAO_ACCESS_TOKEN=.*", f"KAKAO_ACCESS_TOKEN={access_token}", content)
+                if refresh_token and "KAKAO_REFRESH_TOKEN=" in content:
+                    content = re.sub(r"KAKAO_REFRESH_TOKEN=.*", f"KAKAO_REFRESH_TOKEN={refresh_token}", content)
+                with open(env_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"[카카오 알림] {env_path} 파일의 KAKAO_ACCESS_TOKEN 자동 갱신 완료")
+                break
+            except Exception as e:
+                print(f"[카카오 알림 WARN] {env_path} 토큰 파일 갱신 실패: {e}")
 
-    # 1) GCS에 최신 갱신된 카카오 토큰이 있으면 우선 로드
+
+def _load_token_dict():
+    # 1) GCS에 최신 갱신된 카카오 토큰이 있으면 최우선 로드 (클라우드 환경 공유)
     if PROJECT_ID and BUCKET_NAME:
         try:
             from google.cloud import storage
@@ -33,7 +45,15 @@ def _load_token_dict():
         except Exception:
             pass
 
-    # 2) /tmp 런타임 토큰 확인
+    # 2) 기본 TOKEN_FILE(kakao_token.json) 로드
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[카카오 알림] 토큰 파일 로드 실패: {type(e).__name__}")
+
+    # 3) /tmp 런타임 토큰 확인
     if os.path.exists(TMP_TOKEN_FILE):
         try:
             with open(TMP_TOKEN_FILE, "r", encoding="utf-8") as f:
@@ -41,13 +61,15 @@ def _load_token_dict():
         except Exception:
             pass
 
-    # 3) 기본 TOKEN_FILE 로드
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[카카오 알림] 토큰 파일 로드 실패: {type(e).__name__}")
+    # 4) 환경변수에 토큰이 명시되어 있으면 로드
+    if Config.KAKAO_ACCESS_TOKEN or Config.KAKAO_REFRESH_TOKEN:
+        return {
+            "access_token": Config.KAKAO_ACCESS_TOKEN,
+            "refresh_token": Config.KAKAO_REFRESH_TOKEN,
+            "client_id": Config.KAKAO_CLIENT_ID,
+            "client_secret": Config.KAKAO_CLIENT_SECRET,
+        }
+
     return None
 
 
@@ -81,6 +103,9 @@ def _save_token_dict(token_data: dict):
             )
         except Exception:
             pass
+
+    # 4) 로컬 .env 파일도 최신 액세스 토큰으로 동기화
+    _update_env_file(token_data.get("access_token"), token_data.get("refresh_token"))
 
 
 def get_valid_access_token():
