@@ -1,0 +1,15 @@
+.gcloudignore
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+kakao_token.json
+*token*.json
+
+*.bak*
+*.backup*
+*.corrupt*
+test_*.py
+__pycache__/
+*.pyc

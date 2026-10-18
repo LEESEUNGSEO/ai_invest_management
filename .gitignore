@@ -1,0 +1,44 @@
+# 환경 변수 및 시크릿 키
+.env
+.env.*
+!.env.example
+
+# 인증 토큰 및 계정 자격증명
+kakao_token.json
+*token*.json
+client_secrets*.json
+credentials*.json
+
+# 로그 및 임시 파일
+latest_market_report.txt
+*.log
+
+# Python 바이트코드 및 캐시
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# 가상 환경
+venv/
+.venv/
+env/
+ENV/
+
+# IDE 및 에디터 설정
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS 파일
+.DS_Store
+Thumbs.db
+
+# 백업 및 임시 파일
+*.bak*
+*.backup*
+*.before*
+*.corrupt*
+*.tmp
