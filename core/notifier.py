@@ -19,6 +19,7 @@ def _load_token_dict():
             "access_token": Config.KAKAO_ACCESS_TOKEN,
             "refresh_token": Config.KAKAO_REFRESH_TOKEN,
             "client_id": Config.KAKAO_CLIENT_ID,
+            "client_secret": Config.KAKAO_CLIENT_SECRET,
         }
 
     # 1) GCS에 최신 갱신된 카카오 토큰이 있으면 우선 로드
@@ -99,10 +100,16 @@ def get_valid_access_token():
         pass
 
     # 만료된 경우 refresh_token으로 재발급
-    refresh_token = token_data.get("refresh_token")
+    refresh_token = token_data.get("refresh_token") or Config.KAKAO_REFRESH_TOKEN
     client_id = token_data.get("client_id") or Config.KAKAO_CLIENT_ID
+    client_secret = token_data.get("client_secret") or Config.KAKAO_CLIENT_SECRET
+
     if not refresh_token:
         print("[카카오 알림] refresh_token이 없어 토큰을 자동 갱신할 수 없습니다.")
+        return None
+
+    if not client_id:
+        print("[카카오 알림] client_id(카카오 REST API 키)가 설정되지 않아 토큰을 갱신할 수 없습니다. (KAKAO_CLIENT_ID 확인 필요)")
         return None
 
     refresh_url = "https://kauth.kakao.com/oauth/token"
@@ -111,6 +118,9 @@ def get_valid_access_token():
         "client_id": client_id,
         "refresh_token": refresh_token
     }
+    if client_secret:
+        payload["client_secret"] = client_secret
+
     try:
         res = requests.post(refresh_url, data=payload, timeout=10)
         data = res.json()
@@ -118,15 +128,17 @@ def get_valid_access_token():
             token_data["access_token"] = data["access_token"]
             if "refresh_token" in data:
                 token_data["refresh_token"] = data["refresh_token"]
+            if client_id and "client_id" not in token_data:
+                token_data["client_id"] = client_id
             _save_token_dict(token_data)
             print("[카카오 알림] Access Token 자동 재발급 완료")
             return token_data["access_token"]
         else:
             print(f"[카카오 알림] 토큰 갱신 실패: {data}")
+            return None
     except Exception as e:
         print(f"[카카오 알림] 토큰 갱신 통신 오류: {e}")
-
-    return token_data.get("access_token")
+        return None
 
 
 def split_message(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
