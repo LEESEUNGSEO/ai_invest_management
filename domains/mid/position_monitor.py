@@ -157,7 +157,7 @@ def _evaluate_single_watchlist_item(
         print(f"[RiskEngine 거절] {ticker}: {reason}")
         return None, item, available_cash
 
-    buy_qty = min(req_qty, approved_qty) if req_qty > 0 else approved_qty
+    buy_qty = approved_qty  # 리스크 엔진이 예수금 예산에 맞게 승인한 수량 전량 매수 (다수 주 매수 지원)
     print(f"[장중 진입 시도] {ticker} 현재가 ${cur_p:.2f} <= 목표가 ${proposed_p:.2f} (승인수량: {buy_qty}주)")
     ok, odno, msg = submit_order_safely(client, state, ticker, buy_qty, cur_p, "BUY")
     if ok:
