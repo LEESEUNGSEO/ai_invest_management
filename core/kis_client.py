@@ -1,3 +1,4 @@
+from datetime import datetime, timezone, timedelta
 import os
 import json
 import time
@@ -117,38 +118,109 @@ class KISOrderClient:
         self._token_expired_at = time.time() + 3600
         return token
 
+    def _get_cash_from_balance(self) -> float:
+        """해외주식 잔고 API(inquire-balance) output2에서 외화예수금 추출 (24시간 동작)"""
+        try:
+            token = self.get_token()
+            tr_id = "VTTS3012R" if self.is_paper else "TTTS3012R"
+            params = {
+                "CANO": self.cano,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "OVRS_EXCG_CD": "NASD",
+                "TR_CRCY_CD": "USD",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": ""
+            }
+            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance?{urllib.parse.urlencode(params)}"
+            headers = {
+                "Content-Type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+                "tr_id": tr_id,
+            }
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                output2 = data.get("output2", {})
+                if isinstance(output2, dict):
+                    for key in ["frcr_drwg_psbl_amt_1", "frcr_dncl_amt_2", "frcr_ord_psbl_amt", "ovrs_ord_psbl_amt"]:
+                        val = float(output2.get(key, 0.0) or 0.0)
+                        if val > 0:
+                            return val
+        except Exception as e:
+            print(f"[KIS] 잔고 API Fallback 조회 중 예외: {e}")
+        return 0.0
+
     def get_available_cash_usd(self) -> float:
-        """가용 외화 예수금 조회 (외화 + 미결제 예수금 반영)"""
+        """해외주식 매수가능금액 조회 (외화 + 미결제 반영)
+        - 실전 주간(08:00~18:00 KST): TTTS3007R
+        - 실전 야간/정규장(18:00~익일 08:00 KST): JTTT3007R
+        - 모의투자: VTRP6504R
+        - 1차 조회 실패 시 inquire-balance (TTTS3012R) output2를 통한 Fallback
+        """
         token = self.get_token()
+
+        # 한국 표준시(KST, UTC+9) 기준 주간/야간 구분
+        kst = timezone(timedelta(hours=9))
+        now_kst = datetime.now(kst)
+        hour = now_kst.hour
+        is_night = (hour >= 18 or hour < 8)
+
+        if self.is_paper:
+            tr_id_candidates = ["VTRP6504R"]
+        else:
+            # 야간이면 JTTT3007R 우선, 주간이면 TTTS3007R 우선 (실패 시 상호 fallback)
+            tr_id_candidates = ["JTTT3007R", "TTTS3007R"] if is_night else ["TTTS3007R", "JTTT3007R"]
+
         params = {
             "CANO": self.cano,
             "ACNT_PRDT_CD": self.acnt_prdt_cd,
             "OVRS_EXCG_CD": "NASD",
             "NATN_CD": "840",
             "TR_CRCY_CD": "USD",
-            "WCRC_FRCR_DVSN_CD": "02"
+            "WCRC_FRCR_DVSN_CD": "02",
+            "ITEM_CD": "AAPL",
+            "OVRS_ORD_UNPR": "0"
         }
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount?{urllib.parse.urlencode(params)}"
-        tr_id = "VTRP6504R" if self.is_paper else "TTTS3007R"
-        headers = {
-            "Content-Type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {token}",
-            "appkey": self.app_key,
-            "appsecret": self.app_secret,
-            "tr_id": tr_id,
-        }
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                output = data.get("output", {})
-                cash = float(output.get("ovrs_ord_psbl_amt", 0.0))
-                if cash <= 0:
-                    cash = float(output.get("ord_psbl_frcr_amt", 0.0))
-                return cash
-        except Exception as e:
-            print(f"[KIS] 가용 예수금 조회 예외: {e}")
-            return 0.0
+
+        for tr_id in tr_id_candidates:
+            headers = {
+                "Content-Type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+                "tr_id": tr_id,
+            }
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    rt_cd = data.get("rt_cd", "")
+                    if rt_cd == "0":
+                        output = data.get("output", {})
+                        cash = float(output.get("ovrs_ord_psbl_amt", 0.0) or 0.0)
+                        if cash <= 0:
+                            cash = float(output.get("ord_psbl_frcr_amt", 0.0) or 0.0)
+                        if cash <= 0:
+                            cash = float(output.get("frcr_ord_psbl_amt1", 0.0) or 0.0)
+                        if cash > 0:
+                            return cash
+                    else:
+                        msg = data.get("msg1", "")
+                        print(f"[KIS] 매수가능금액 TR_ID({tr_id}) 조회 실패: {msg}")
+            except Exception as e:
+                print(f"[KIS] 매수가능금액 TR_ID({tr_id}) 요청 예외: {e}")
+
+        # Fallback: 24시간 조회 가능한 잔고 API(inquire-balance) output2에서 외화예수금 조회
+        print("[KIS] 매수가능금액(inquire-psamount) 실패로 잔고(inquire-balance) output2에서 외화예수금 Fallback 시도")
+        fallback_cash = self._get_cash_from_balance()
+        if fallback_cash > 0:
+            print(f"[KIS] 잔고 Fallback 외화예수금 확인: ${fallback_cash:.2f}")
+            return fallback_cash
+
+        return 0.0
 
     def get_account_balance(self) -> Dict[str, Any]:
         """해외주식 잔고 조회"""
