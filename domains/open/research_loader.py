@@ -172,8 +172,146 @@ def _load_from_env() -> Optional[dict]:
         return None
 
 
+
+def _get_or_create_drive_folder(drive_service, folder_name: str = "US_Market_Deep_Research") -> Optional[str]:
+    """구글 드라이브 내 지정 폴더 ID 조회 혹은 생성"""
+    try:
+        q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        res = drive_service.files().list(
+            q=q,
+            fields="files(id, name)",
+            spaces="drive",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        files = res.get("files", [])
+        if files:
+            return files[0]["id"]
+
+        body = {
+            "name": folder_name,
+            "mimeType": "application/vnd.google-apps.folder"
+        }
+        created = drive_service.files().create(body=body, fields="id", supportsAllDrives=True).execute()
+        print(f"[Google Drive] 폴더 생성 완료: {folder_name} (ID: {created.get('id')})")
+        return created.get("id")
+    except Exception as e:
+        print(f"[Google Drive WARN] 폴더 확인/생성 실패: {e}")
+        return None
+
+
+def _load_from_google_drive() -> Optional[dict]:
+    """
+    서비스 계정과 공유된 구글 드라이브에서 리서치 JSON을 탐색:
+    1. root(루트)에 있는 리서치 JSON 파일 우선 탐색
+    2. 유효한 파일 발견 시 파싱 후 'US_Market_Deep_Research' 폴더로 이동 (아카이빙)
+    3. 루트에 없으면 이미 'US_Market_Deep_Research' 폴더에 보관된 당일 최신 파일 탐색
+    """
+    try:
+        import google.auth
+        from googleapiclient.discovery import build
+        import io
+        from googleapiclient.http import MediaIoBaseDownload
+    except ImportError:
+        print("[Google Drive WARN] google-api-python-client 미설치로 Drive 탐색 스킵")
+        return None
+
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.file"
+        ]
+        credentials, _ = google.auth.default(scopes=scopes)
+        drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+        q = "mimeType != 'application/vnd.google-apps.folder' and trashed = false and name contains '.json'"
+        res = drive_service.files().list(
+            q=q,
+            fields="files(id, name, parents, createdTime, modifiedTime)",
+            orderBy="modifiedTime desc",
+            pageSize=30,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+
+        files = res.get("files", [])
+        if not files:
+            print("[Google Drive] 공유된 JSON 파일이 없습니다.")
+            return None
+
+        target_folder_name = "US_Market_Deep_Research"
+        archive_folder_id = _get_or_create_drive_folder(drive_service, target_folder_name)
+
+        candidates_in_root = []
+        candidates_in_archive = []
+
+        for f in files:
+            fname = f.get("name", "")
+            parents = f.get("parents", [])
+            if not any(k in fname.lower() for k in ["market", "research", "deep", "data", "us_"]):
+                continue
+
+            if archive_folder_id and archive_folder_id in parents:
+                candidates_in_archive.append(f)
+            else:
+                candidates_in_root.append(f)
+
+        ordered_candidates = candidates_in_root + candidates_in_archive
+
+        for file_info in ordered_candidates:
+            fid = file_info["id"]
+            fname = file_info["name"]
+            try:
+                request = drive_service.files().get_media(fileId=fid)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+
+                content = fh.getvalue().decode("utf-8")
+                parsed = json.loads(content)
+
+                is_fresh, reason = is_research_fresh(parsed, fname)
+                if is_fresh:
+                    print(f"[Google Drive 로드] [OK] 구글 드라이브 최신 유효 리서치 확인: {fname} ({reason})")
+
+                    if archive_folder_id and (archive_folder_id not in file_info.get("parents", [])):
+                        try:
+                            prev_parents = ",".join(file_info.get("parents", []))
+                            drive_service.files().update(
+                                fileId=fid,
+                                addParents=archive_folder_id,
+                                removeParents=prev_parents if prev_parents else None,
+                                fields="id, parents",
+                                supportsAllDrives=True
+                            ).execute()
+                            print(f"[Google Drive 이동] [OK] {fname} 파일을 '{target_folder_name}' 폴더로 이동 완료!")
+                        except Exception as move_err:
+                            print(f"[Google Drive WARN] 파일 이동 실패: {move_err}")
+
+                    try:
+                        save_market_research(parsed)
+                    except Exception:
+                        pass
+
+                    return parsed
+                else:
+                    print(f"[Google Drive WARN] {fname} 만료/부적합: {reason}")
+            except Exception as file_err:
+                print(f"[Google Drive WARN] {fname} 다운로드/파싱 실패: {file_err}")
+
+    except Exception as e:
+        print(f"[Google Drive WARN] 구글 드라이브 연동 예외: {e}")
+
+    return None
+
 def load_latest_market_research() -> dict:
-    """GCS -> 로컬 파일 -> 환경변수 순서로 신선도가 검증된 최신 리서치 데이터를 로드합니다."""
+    """Google Drive -> GCS -> 로컬 -> 환경변수 순으로 최신 리서치 데이터를 로드합니다."""
+    drive_data = _load_from_google_drive()
+    if drive_data:
+        return drive_data
+
     gcs_data = _load_from_gcs()
     if gcs_data:
         return gcs_data
