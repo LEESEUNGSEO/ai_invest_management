@@ -1,6 +1,6 @@
 import json
 from typing import Dict, Any, List, Set, Tuple, Optional
-from core.kis_client import get_overseas_price
+from core.kis_client import get_overseas_price, get_overseas_price_info
 from domains.open.gemini_analyzer import call_gemini_with_search
 from domains.mid.order_executor import submit_order_safely
 
@@ -45,8 +45,9 @@ def _evaluate_single_holding_defense(
         print(f"[MID Skip] {symbol}: 미체결 주문 존재로 매도 검사 건너뜀")
         return None
 
-    cur_price = get_overseas_price(symbol)
+    cur_price, exch_code = get_overseas_price_info(symbol)
     if cur_price <= 0:
+        print(f"[MID Defense Skip] {symbol}: 실시간 시세 조회 불가 (${cur_price})")
         return None
 
     prev_high = tracking_highs.get(symbol, cur_price)
@@ -59,7 +60,7 @@ def _evaluate_single_holding_defense(
 
     # 1. 목표가 도달 시 익절 매도
     if target_p > 0 and cur_price >= target_p:
-        ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL")
+        ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL", exch_code=exch_code)
         if ok:
             pending_symbols.add(symbol)
             return f"🎉 {symbol} {qty}주 목표가(${target_p:.2f}) 도달 익절 매도 접수 (${cur_price:.2f}, 주문번호:{odno})"
@@ -67,7 +68,7 @@ def _evaluate_single_holding_defense(
 
     # 2. 손절선 도달 시 방어 매도
     if stop_p > 0 and cur_price <= stop_p:
-        ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL")
+        ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL", exch_code=exch_code)
         if ok:
             pending_symbols.add(symbol)
             return f"⚠️ {symbol} {qty}주 손절선(${stop_p:.2f}) 도달 방어 매도 접수 (${cur_price:.2f}, 주문번호:{odno})"
@@ -78,7 +79,7 @@ def _evaluate_single_holding_defense(
     if profit_rate <= -0.035:
         should_sell, reason = _check_emergency_drop_ai(symbol, avg_p, cur_price, profit_rate)
         if should_sell:
-            ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL")
+            ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL", exch_code=exch_code)
             if ok:
                 pending_symbols.add(symbol)
                 return f"🚨 {symbol} {qty}주 급락 악재 AI 긴급 손절 접수 ({reason}, 주문번호:{odno})"
@@ -88,7 +89,7 @@ def _evaluate_single_holding_defense(
     if cur_high > 0:
         pullback = (cur_high - cur_price) / cur_high
         if pullback >= 0.03 and cur_price > avg_p:
-            ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL")
+            ok, odno, msg = submit_order_safely(client, state, symbol, qty, cur_price, "SELL", exch_code=exch_code)
             if ok:
                 pending_symbols.add(symbol)
                 return f"🛡️ {symbol} {qty}주 트레일링 스탑 고점(${cur_high:.2f}) 대비 -{pullback*100:.1f}% 하락 수익 보존 매도 접수 (${cur_price:.2f}, 주문번호:{odno})"
@@ -142,8 +143,13 @@ def _evaluate_single_watchlist_item(
         print(f"[MID Watchlist Skip] {ticker}: 이미 보유 중이거나 미체결 주문 존재")
         return None, None, available_cash
 
-    cur_p = get_overseas_price(ticker)
-    if cur_p <= 0 or cur_p > proposed_p:
+    cur_p, exch_code = get_overseas_price_info(ticker)
+    if cur_p <= 0:
+        print(f"[MID Watchlist Skip] {ticker}: 실시간 시세 조회 실패 (${cur_p})")
+        return None, item, available_cash
+
+    if cur_p > proposed_p:
+        print(f"[MID Watchlist Wait] {ticker}: 현재가 ${cur_p:.2f} > 진입희망가 ${proposed_p:.2f} (대기)")
         return None, item, available_cash
 
     # 리스크 엔진 검증
@@ -159,7 +165,7 @@ def _evaluate_single_watchlist_item(
 
     buy_qty = approved_qty  # 리스크 엔진이 예수금 예산에 맞게 승인한 수량 전량 매수 (다수 주 매수 지원)
     print(f"[장중 진입 시도] {ticker} 현재가 ${cur_p:.2f} <= 목표가 ${proposed_p:.2f} (승인수량: {buy_qty}주)")
-    ok, odno, msg = submit_order_safely(client, state, ticker, buy_qty, cur_p, "BUY")
+    ok, odno, msg = submit_order_safely(client, state, ticker, buy_qty, cur_p, "BUY", exch_code=exch_code)
     if ok:
         pending_symbols.add(ticker)
         new_cash = available_cash - (cur_p * buy_qty)

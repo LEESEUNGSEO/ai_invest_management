@@ -5,7 +5,7 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from core.config import Config
 
 
@@ -420,21 +420,46 @@ class KISOrderClient:
             return {"rt_cd": "1", "msg1": str(e)}
 
 
-def get_overseas_price(symbol: str, exchange: Optional[str] = None) -> float:
-    """해외주식 실시간 시세 조회"""
+# 거래소 코드 변환 매핑
+# 시세 조회용(EXCD, 3자리: NAS, NYS, AMS) <-> 주문/잔고용(OVRS_EXCG_CD, 4자리: NASD, NYSE, AMEX)
+QUOTE_TO_ORDER_EXCHANGE = {
+    "NAS": "NASD",
+    "NYS": "NYSE",
+    "AMS": "AMEX",
+}
+
+ORDER_TO_QUOTE_EXCHANGE = {
+    "NASD": "NAS",
+    "NYSE": "NYS",
+    "AMEX": "AMS",
+}
+
+
+def get_overseas_price_info(symbol: str, exchange: Optional[str] = None) -> Tuple[float, Optional[str]]:
+    """
+    해외주식 실시간 시세 및 거래소 코드 조회
+    반환: (현재체결가: float, 주문용 거래소코드: Optional[str])
+    """
     app_key = Config.KIS_APP_KEY or get_secret("kis-live-app-key")
     app_secret = Config.KIS_APP_SECRET or get_secret("kis-live-app-secret")
     if not app_key or not app_secret:
-        return 0.0
+        return 0.0, None
 
     base_url = Config.KIS_BASE_URL
     token = _shared_get_kis_token(base_url, app_key, app_secret)
 
-    exchanges = [exchange.upper()] if exchange else ["NASD", "NYSE", "AMEX"]
-    for exch in exchanges:
+    if exchange:
+        exch_upper = exchange.upper()
+        quote_exch = ORDER_TO_QUOTE_EXCHANGE.get(exch_upper, exch_upper)
+        quote_candidates = [quote_exch]
+    else:
+        # 미국 3대 시장 시세 전용 3자리 코드: 나스닥(NAS), 뉴욕(NYS), 아멕스(AMS)
+        quote_candidates = ["NAS", "NYS", "AMS"]
+
+    for q_exch in quote_candidates:
         params = {
             "AUTH": "",
-            "EXCD": exch,
+            "EXCD": q_exch,
             "SYMB": symbol.upper()
         }
         url = f"{base_url}/uapi/overseas-price/v1/quotations/price?{urllib.parse.urlencode(params)}"
@@ -452,7 +477,14 @@ def get_overseas_price(symbol: str, exchange: Optional[str] = None) -> float:
                 output = data.get("output", {})
                 last_price = float(output.get("last", 0.0))
                 if last_price > 0:
-                    return last_price
+                    order_exch = QUOTE_TO_ORDER_EXCHANGE.get(q_exch, "NASD")
+                    return last_price, order_exch
         except Exception:
             continue
-    return 0.0
+    return 0.0, None
+
+
+def get_overseas_price(symbol: str, exchange: Optional[str] = None) -> float:
+    """해외주식 실시간 시세 조회 (호환용)"""
+    price, _ = get_overseas_price_info(symbol, exchange)
+    return price
